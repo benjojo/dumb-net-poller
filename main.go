@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -24,6 +25,7 @@ func main() {
 	collectdserver := flag.String("collectdserver", "localhost", "put here the collectd server to send stats to")
 	collectdport := flag.String("collectdport", "25826", "put here the collectd server port to send stats to")
 	hostnameoveride := flag.String("hostnameoveride", "", "override what hostname is sent to collectd, Default is target")
+	stdout := flag.Bool("stdout", false, "echo strings to be used in the exec mode of collectd")
 	flag.Parse()
 
 	collectdhostname := strings.Split(*sshtarget, ":")[0]
@@ -67,16 +69,29 @@ func main() {
 		}
 		// fmt.Println(b.String())
 		ifinfo := parseNetDev(b.String())
-		sendToCollectdServer(ifinfo, collectdhostname, conn)
+		if *stdout {
+			echoToCollectdServer(ifinfo, collectdhostname)
+		} else {
+			sendToCollectdServer(ifinfo, collectdhostname, conn)
+		}
 		time.Sleep(time.Second * 10)
 	}
 
+}
+
+func echoToCollectdServer(input map[string]interfaceInfo, hostname string) {
+	for interfacename, info := range input {
+		interfacename = strings.Replace(interfacename, "-", "", 0)
+		fmt.Printf("PUTVAL %s/interface-%s/if_octets interval=10 N:%d:%d\n", hostname, interfacename, api.Derive(info.RX["bytes"]), api.Derive(info.TX["bytes"]))
+	}
 }
 
 func sendToCollectdServer(input map[string]interfaceInfo, hostname string, conn *network.Client) {
 	ctx := context.Background() // Dunno
 
 	for interfacename, info := range input {
+		interfacename = strings.Replace(interfacename, "-", "", 0)
+		// log.Printf("Sending stats for interface '%s'", interfacename)
 		vl := api.ValueList{
 			Identifier: api.Identifier{
 				Host:   hostname,
@@ -89,7 +104,8 @@ func sendToCollectdServer(input map[string]interfaceInfo, hostname string, conn 
 		}
 		// log.Printf("Debug: %s -> %d|%d", interfacename, api.Derive(info.RX["bytes"]), api.Derive(info.TX["bytes"]))
 		if err := conn.Write(ctx, &vl); err != nil {
-			return
+			log.Printf("collectd sending error %s", err.Error())
+			continue
 		}
 	}
 
