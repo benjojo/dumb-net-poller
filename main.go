@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -18,22 +19,35 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+var (
+	sshtarget = flag.String("target", "192.168.2.1:22",
+		"The address of the SSH target to get data from")
+	sshusername = flag.String("username", "ben", "The SSH username")
+	sshpassword = flag.String("password", os.Getenv("SSH_PASSWORD"),
+		"The SSH password, can also use ${SSH_PASSWORD}")
+	configfile     = flag.String("cfg", "", "a json file that will override all settings")
+	collectdserver = flag.String("collectdserver", "localhost",
+		"put here the collectd server to send stats to")
+	collectdport = flag.String("collectdport", "25826",
+		"put here the collectd server port to send stats to")
+	hostnameoveride = flag.String("hostnameoveride", "",
+		"override what hostname is sent to collectd, Default is target")
+	stdout = flag.Bool("stdout", false,
+		"echo strings to be used in the exec mode of collectd")
+)
+
 func main() {
-	sshtarget := flag.String("target", "192.168.2.1:22", "The address of the SSH target to get data from")
-	sshusername := flag.String("username", "ben", "The SSH username")
-	sshpassword := flag.String("password", os.Getenv("SSH_PASSWORD"), "The SSH password, can also use ${SSH_PASSWORD}")
-	collectdserver := flag.String("collectdserver", "localhost", "put here the collectd server to send stats to")
-	collectdport := flag.String("collectdport", "25826", "put here the collectd server port to send stats to")
-	hostnameoveride := flag.String("hostnameoveride", "", "override what hostname is sent to collectd, Default is target")
-	stdout := flag.Bool("stdout", false, "echo strings to be used in the exec mode of collectd")
 	flag.Parse()
+
+	parseConfig()
 
 	collectdhostname := strings.Split(*sshtarget, ":")[0]
 	if *hostnameoveride != "" {
 		collectdhostname = *hostnameoveride
 	}
 
-	conn, err := network.Dial(net.JoinHostPort(*collectdserver, *collectdport), network.ClientOptions{BufferSize: 100})
+	conn, err := network.Dial(net.JoinHostPort(*collectdserver, *collectdport),
+		network.ClientOptions{BufferSize: 100})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -67,7 +81,7 @@ func main() {
 		if err := session.Run("cat /proc/net/dev"); err != nil {
 			log.Fatal("Failed to run: " + err.Error())
 		}
-		// fmt.Println(b.String())
+
 		ifinfo := parseNetDev(b.String())
 		if *stdout {
 			echoToCollectdServer(ifinfo, collectdhostname)
@@ -91,7 +105,6 @@ func sendToCollectdServer(input map[string]interfaceInfo, hostname string, conn 
 
 	for interfacename, info := range input {
 		interfacename = strings.Replace(interfacename, "-", "", 0)
-		// log.Printf("Sending stats for interface '%s'", interfacename)
 		vl := api.ValueList{
 			Identifier: api.Identifier{
 				Host:   hostname,
@@ -102,7 +115,6 @@ func sendToCollectdServer(input map[string]interfaceInfo, hostname string, conn 
 			Interval: 10 * time.Second,
 			Values:   []api.Value{api.Derive(info.RX["bytes"]), api.Derive(info.TX["bytes"])},
 		}
-		// log.Printf("Debug: %s -> %d|%d", interfacename, api.Derive(info.RX["bytes"]), api.Derive(info.TX["bytes"]))
 		if err := conn.Write(ctx, &vl); err != nil {
 			log.Printf("collectd sending error %s", err.Error())
 			continue
@@ -141,9 +153,6 @@ func parseNetDev(input string) map[string]interfaceInfo {
 			}
 		}
 	}
-	// fmt.Printf("%v\n", RXKeys)
-	// fmt.Printf("%v\n", TXKeys)
-	// totalkeys := len(RXKeys) + len(TXKeys)
 
 	interfaces := make(map[string]interfaceInfo)
 
@@ -175,19 +184,11 @@ func parseNetDev(input string) map[string]interfaceInfo {
 			partcount++
 		}
 
-		// log.Printf("I passed parse!")
-
 		fin.RX = RX
 		fin.TX = TX
 		ifname := strings.Split(parts[0], ":")[0]
 		interfaces[ifname] = fin
-
-		// for k, v := range fin.TX {
-		// 	log.Printf("Presend Debug TX: %s - %s - %d", ifname, k, v)
-		// }
 	}
-
-	// fmt.Printf("%v", interfaces)
 	return interfaces
 }
 
@@ -200,4 +201,50 @@ func compressWhitespace(input string) string {
 	final := releadclosewhtsp.ReplaceAllString(input, "")
 	final = reinsidewhtsp.ReplaceAllString(final, " ")
 	return final
+}
+
+type jsonConfig struct {
+	Collectdport    string `json:"collectdport"`
+	Collectdserver  string `json:"collectdserver"`
+	Hostnameoveride string `json:"hostnameoveride"`
+	Sshpassword     string `json:"sshpassword"`
+	Sshtarget       string `json:"sshtarget"`
+	Sshusername     string `json:"sshusername"`
+	Stdout          bool   `json:"stdout"`
+}
+
+func parseConfig() {
+	if *configfile == "" {
+		return
+	}
+
+	f, err := os.Open(*configfile)
+	if err != nil {
+		log.Fatalf("Unable to open config file, %s", err.Error())
+	}
+
+	jreader := json.NewDecoder(f)
+	cfg := jsonConfig{}
+	err = jreader.Decode(&cfg)
+	if err != nil {
+		log.Fatalf("Unable to parse config file, %s", err.Error())
+	}
+
+	if cfg.Sshtarget == "" || cfg.Sshusername == "" ||
+		cfg.Sshpassword == "" {
+		log.Fatalf("sshpassword, sshtarget, and sshusername must be filled out in the config file")
+	}
+
+	if cfg.Stdout != true &&
+		(cfg.Collectdserver == "" || cfg.Collectdport == "") {
+		log.Fatalf("You need to set a collectd server to submit to, or enable stdout mode.")
+	}
+
+	sshtarget = &cfg.Sshtarget
+	sshusername = &cfg.Sshusername
+	sshpassword = &cfg.Sshpassword
+	collectdserver = &cfg.Collectdserver
+	collectdport = &cfg.Collectdport
+	hostnameoveride = &cfg.Hostnameoveride
+	stdout = &cfg.Stdout
 }
