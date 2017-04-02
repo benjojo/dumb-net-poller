@@ -72,7 +72,6 @@ func main() {
 		if err != nil {
 			log.Fatal("Failed to create session: ", err)
 		}
-		defer session.Close()
 
 		// Once a Session is created, you can execute a single command on
 		// the remote side using the Run method.
@@ -88,6 +87,7 @@ func main() {
 		} else {
 			sendToCollectdServer(ifinfo, collectdhostname, conn)
 		}
+		session.Close()
 		time.Sleep(time.Second * 10)
 	}
 
